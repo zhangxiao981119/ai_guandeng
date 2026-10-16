@@ -9,7 +9,7 @@ interview_no_show.py — 面试爽约分析（可复现）
 
 产出:
     output/report.txt      全部数字（README 里每个数字都能在这里找到）
-    output/fig_*.png       6 张图
+    output/fig_*.png       7 张图
 
 设计原则:
     1. 只用发放数据，不引入任何外部或合成数据
@@ -232,7 +232,7 @@ def fig_gap(e):
     ax.hist(e.stale_h, bins=np.arange(0, 1.25, 1 / 60), color="#1565c0")
     ax.axvspan(18 / 60, 22 / 60, color="red", alpha=.22)
     ax.set_xlabel("间隔（小时，每分钟一档）"); ax.set_ylabel("记录数")
-    ax.set_title("18~22 分钟之间 0 条记录：两条取数通道的指纹，而不是自然衰减")
+    ax.set_title("18~22 分钟之间 0 条记录：断崖＋空档，指向取数机制切换（假设性解释，非结论）")
     ax.grid(alpha=.25, axis="y")
     fig.tight_layout(); fig.savefig(OUT / "fig_gap.png", dpi=150); plt.close(fig)
 
@@ -338,6 +338,11 @@ def main():
         say("  %-14s AUC = %.3f" % (c, auc(e[c], e.y)))
     say("  → intent_score（系统明面上的邀约依据）AUC 0.498 = 零区分度")
     say("  → stale_h（活跃数据新鲜度）AUC 0.807 = 唯一有实质区分度的字段")
+    say("  intent_score 六档明细（U 形，非单调）:")
+    ib0 = pd.cut(e.intent_score, [0, 5, 10, 15, 20, 25, 31], right=False)
+    for k0, g0 in e.groupby(ib0, observed=True):
+        say("    %-9s n=%3d  爽约率 %5.1f%%" % (str(k0), len(g0), 100 * g0.y.mean()))
+    say("  → 最高意愿档（25-30）反而比最低档更高；读图见 fig_intent.png")
 
     say("\n" + "=" * 66)
     say("三、根因：不是渐变，是断崖 + 观测空档")
@@ -422,6 +427,9 @@ def main():
     say("      两组 95%% 置信区间%s" %
         ("完全不重叠" if wilson_ci(a.y.sum(), len(a))[1] < wilson_ci(b.y.sum(), len(b))[0]
          else "有重叠"))
+    say("      两组的陈旧程度几乎相同：stale_h 均值 %.3fh（%s）vs %.3fh（其他三部门）；中位 %.3fh vs %.3fh"
+        % (a.stale_h.mean(), dept, b.stale_h.mean(), a.stale_h.median(), b.stale_h.median()))
+    say("      → 部门差异不能用'陈旧得更久'解释（README 根因段引用的就是这两个均值）")
     p_f = fisher_two_sided(int(a.y.sum()), len(a) - int(a.y.sum()),
                            int(b.y.sum()), len(b) - int(b.y.sum()))
     say("      Fisher 精确检验 双尾 p = %.2g" % p_f)
@@ -542,9 +550,10 @@ def main():
         net = hit * COST_NO_SHOW_H - n * COST_CONFIRM_H
         p = hit / n if n else 0
         need = BREAKEVEN / p if p else float("inf")
-        say("  %-24s 干预%4d (%2.0f%%)  覆盖%5.1f%%  命中%5.1f%%  净收益%+7d h  需有效率>%3.0f%%"
-            % (name, n, 100 * n / n_all, 100 * hit / tot, 100 * p, net,
-               100 * need if need != float("inf") else 999))
+        tail = ("即使二次确认 100% 有效也仍亏损" if need >= 1
+                else "需有效率>%2.0f%% 才划算" % (100 * need))
+        say("  %-24s 干预%4d (%2.0f%%)  覆盖%5.1f%%  命中%5.1f%%  净收益%+7d h  %s"
+            % (name, n, 100 * n / n_all, 100 * hit / tot, 100 * p, net, tail))
         return net
 
     rules = {}
