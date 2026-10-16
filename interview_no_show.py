@@ -39,8 +39,8 @@ L = []
 COST_NO_SHOW_H = 90.0     # 一次爽约损失 90 小时
 COST_CONFIRM_H = 20.0     # 一次提前二次确认花费 20 小时
 BREAKEVEN = COST_CONFIRM_H / COST_NO_SHOW_H        # = 0.2222 保本率
-CLIFF_H = 0.30            # 分界阈值（小时）= 18 分钟，用「> 18 分钟」判定陈旧
-CLIFF_MIN = 18.0          # 同上，分钟表示
+CLIFF_MIN = 18.0          # 分界阈值（分钟）：用「> 18 分钟」判定陈旧（唯一定义处）
+CLIFF_H = CLIFF_MIN / 60  # 同一阈值的另一单位表示，由上面推导，避免两处各自硬编码
 
 
 def say(s=""):
@@ -133,8 +133,8 @@ def fig_dimensions(e, dept):
         ax.bar(range(len(labels)), vals, width=.6,
                color=["#2e7d32" if ok else "#9e9e9e"] * len(labels))
         ax.axhline(BREAKEVEN * 100, ls=":", c="k", lw=1.1)
-        ax.text(len(labels) - .5, BREAKEVEN * 100 + 1.6, "保本线 22.2%",
-                fontsize=7.5, ha="right")
+        ax.text(len(labels) - .5, BREAKEVEN * 100 + 1.6,
+                "保本线 %.1f%%" % (BREAKEVEN * 100), fontsize=7.5, ha="right")
         for i, (v, n) in enumerate(zip(vals, groups["size"].values)):
             ax.text(i, v + 1.6, "%.0f%%\nn=%d" % (v, n), ha="center", fontsize=7.5)
         ax.set_xticks(range(len(labels)))
@@ -147,14 +147,25 @@ def fig_dimensions(e, dept):
 
     d = stale.groupby("department").y.agg(["mean", "size"])
     d = d.sort_values("mean")
-    bar(axes[0, 0], d, "① 业务部门（4 类）", "✅ 通过：Bonferroni 校正后 p=3.4e-09", True)
+    _a = stale[stale.department == dept]; _b = stale[stale.department != dept]
+    _p = fisher_two_sided(int(_a.y.sum()), len(_a) - int(_a.y.sum()),
+                          int(_b.y.sum()), len(_b) - int(_b.y.sum())) * len(d)
+    bar(axes[0, 0], d, "① 业务部门（4 类）",
+        "✅ 通过：Bonferroni 校正后 p=%.1e" % min(1.0, _p), True)
     axes[0, 0].patches[0].set_color("#c62828")
     for i, lb in enumerate(d.index):
         if lb == dept:
             axes[0, 0].patches[i].set_color("#c62828")
 
     j = stale.groupby("job_category").y.agg(["mean", "size"]).sort_values("mean")
-    bar(axes[0, 1], j, "② 岗位职能（8 类）", "❌ 未通过：校正后最小 p>0.5，样本撑不住", False)
+    _pj = []
+    for _jc in stale.job_category.unique():
+        _s = stale[stale.job_category == _jc]; _t = stale[stale.job_category != _jc]
+        _pj.append(fisher_two_sided(int(_s.y.sum()), len(_s) - int(_s.y.sum()),
+                                    int(_t.y.sum()), len(_t) - int(_t.y.sum())))
+    _pj = min(1.0, min(_pj) * j.shape[0])
+    bar(axes[0, 1], j, "② 岗位职能（8 类）",
+        "❌ 未通过：校正后最小 p=%.2g，样本撑不住" % _pj, False)
 
     ib = e.copy()
     ib["_b"] = pd.cut(ib.intent_score, [0, 10, 20, 30])
@@ -173,7 +184,9 @@ def fig_dimensions(e, dept):
     ax.set_xlabel("意向度评估分（系统当前使用的依据）", fontsize=8.5)
     ax.set_ylabel("爽约率 %", fontsize=9)
     ax.set_ylim(0, 62)
-    ax.set_title("③ 意向评估分（3 档）\n❌ 同一档内通道差 9~24 倍，意向分自身几乎无变化", fontsize=9.5, color="#616161")
+    _ratio = [s_ / f_ for f_, s_ in zip(pi[("mean", "新鲜")], pi[("mean", "陈旧")])]
+    ax.set_title("③ 意向评估分（3 档）\n❌ 同一档内通道差 %.1f~%.1f 倍，意向分自身几乎无变化"
+                 % (min(_ratio), max(_ratio)), fontsize=9.5, color="#616161")
     ax.legend(fontsize=8, loc="upper left", framealpha=.95)
     ax.grid(alpha=.22, axis="y")
 
@@ -193,7 +206,9 @@ def fig_dimensions(e, dept):
     ax.set_xlabel("简历储备量四分位（候选人池大小）", fontsize=8.5)
     ax.set_ylabel("爽约率 %", fontsize=9)
     ax.set_ylim(0, 56)
-    ax.set_title("④ 简历储备量（4 分位）\n❌ 陈旧通道内无单调梯度：32→40→36→36%", fontsize=9.5, color="#616161")
+    _q = [100 * v for v in pp[("mean", "陈旧")]]
+    ax.set_title("④ 简历储备量（4 分位）\n❌ 陈旧通道内无单调梯度：%s"
+                 % "→".join("%.0f%%" % v for v in _q), fontsize=9.5, color="#616161")
     ax.legend(fontsize=8); ax.grid(alpha=.22, axis="y")
 
     fig.suptitle("四个候选维度的逐一压力测试（均限陈旧通道内，即真正需要判断的那批）",
@@ -212,8 +227,10 @@ def fig_cliff(e):
     ax.bar(x, g.rate * 100, width=4.4,
            color=["#2e7d32" if v <= CLIFF_MIN else "#c62828" for v in x])
     ax.axvline(CLIFF_MIN, ls="--", c="k", lw=1.2)
-    ax.annotate("断崖：18 分钟\n(18~22 分钟之间零观测)", xy=(CLIFF_MIN, 40),
-                xytext=(24, 52), fontsize=9.5,
+    nx = e.loc[e.stale_h > CLIFF_H, "stale_h"].min() * 60      # 陈旧侧最小观测（分钟）
+    px = e.loc[e.stale_h <= CLIFF_H, "stale_h"].max() * 60     # 新鲜侧最大观测（分钟）
+    ax.annotate("断崖：%.0f 分钟\n(%.0f~%.0f 分钟之间零观测)" % (CLIFF_MIN, px, nx),
+                xy=(CLIFF_MIN, 40), xytext=(24, 52), fontsize=9.5,
                 arrowprops=dict(arrowstyle="->", lw=1.1))
     for xi, r, n in zip(x, g.rate, g.n):
         if n >= 10:
@@ -251,10 +268,13 @@ def fig_simpson(e):
     for xi, d in zip(x, depts):
         ax.text(xi - w, before[d] + .7, "%.1f" % before[d], ha="center", fontsize=7.5)
     ax.axhline(BREAKEVEN * 100, ls=":", c="k", lw=1.2)
-    ax.text(3.42, BREAKEVEN * 100 + .8, "干预保本线 22.2%", fontsize=8, ha="right")
+    ax.text(3.42, BREAKEVEN * 100 + .8, "干预保本线 %.1f%%" % (BREAKEVEN * 100),
+            fontsize=8, ha="right")
     ax.set_xticks(x); ax.set_xticklabels(depts, fontsize=9)
     ax.set_ylabel("爽约率 %"); ax.legend(fontsize=8.5)
-    ax.set_title("分层后：新鲜通道内部门差异消失（14.0pp → 1.8pp），但陈旧通道内没有")
+    _raw = before.max() - before.min()
+    _fr = after["新鲜通道"].max() - after["新鲜通道"].min()
+    ax.set_title("分层后：新鲜通道内部门差异消失（%.1fpp → %.1fpp），但陈旧通道内没有" % (_raw, _fr))
     ax.grid(alpha=.25, axis="y")
     fig.tight_layout(); fig.savefig(OUT / "fig_simpson.png", dpi=150); plt.close(fig)
 
@@ -278,15 +298,16 @@ def fig_interaction(e, dept):
     for i, (r, he, n) in enumerate(zip(rate, hi_e, [cnt[d_] for d_ in depts])):
         ax.text(i, r + he + 1.2, "%.1f%%  (n=%d)" % (r, n), ha="center", fontsize=8.5)
     ax.axhline(BREAKEVEN * 100, ls=":", c="k", lw=1.2)
-    ax.text(len(depts) - .46, BREAKEVEN * 100 + 1.4, "干预保本线 22.2%", fontsize=8, ha="right")
+    ax.text(len(depts) - .46, BREAKEVEN * 100 + 1.4,
+            "干预保本线 %.1f%%" % (BREAKEVEN * 100), fontsize=8, ha="right")
     ax.set_ylabel("爽约率 %")
     ax.set_title("陈旧通道内：只有 %s 低于保本线（应排除），其余三部门都应干预（误差棒=95%%CI）" % dept)
     ax.set_ylim(0, max(rate) + max(hi_e) + 8); ax.grid(alpha=.25, axis="y")
     fig.tight_layout(); fig.savefig(OUT / "fig_interaction.png", dpi=150); plt.close(fig)
 
 
-def fig_rules(e, rules):
-    names = list(rules); nets = [rules[k][2] for k in names]
+def fig_rules(e, rules, dept):
+    names = list(rules); nets = list(rules.values())
     fig, ax = plt.subplots(figsize=(9, 4.4))
     ax.barh(names, nets, color=["#2e7d32" if v > 0 else "#c62828" for v in nets])
     ax.axvline(0, c="k", lw=1)
@@ -294,7 +315,9 @@ def fig_rules(e, rules):
         ax.text(v + (60 if v > 0 else -60), i, "%+d h" % v, va="center",
                 ha="left" if v > 0 else "right", fontsize=8.5)
     ax.set_xlabel("净收益（小时）＝ 拦截爽约×90 − 干预数×20")
-    ax.set_title("干预谁才划算：只有「按新鲜度」为正；排除风险合规部后（⑦）再 +930 h")
+    _gain = (next(v for k, v in rules.items() if "推荐" in k)
+             - next(v for k, v in rules.items() if "保守版" in k))
+    ax.set_title("干预谁才划算：只有「按新鲜度」为正；排除 %s 后（⑦）再 %+d h" % (dept, _gain))
     ax.set_xlim(min(nets) - 1250, max(nets) + 950)
     ax.grid(alpha=.25, axis="x")
     fig.tight_layout(); fig.savefig(OUT / "fig_rules.png", dpi=150); plt.close(fig)
@@ -313,7 +336,8 @@ def fig_intent(e):
     ax.axhline(e.y.mean() * 100, ls="--", c="k", lw=1.1)
     ax.text(5.42, e.y.mean() * 100 + .4, "整体 12.5%", fontsize=8, ha="right")
     ax.set_xlabel("intent_score（越低＝意愿越低）"); ax.set_ylabel("爽约率 %")
-    ax.set_title("intent_score 几乎没有区分度：U 形起伏，最高档反而更高（AUC 0.498）")
+    ax.set_title("intent_score 几乎没有区分度：两端高、中段低（AUC %.3f）"
+                 % auc(e.intent_score, e.y))
     ax.set_ylim(0, 20); ax.grid(alpha=.25, axis="y")
     fig.tight_layout(); fig.savefig(OUT / "fig_intent.png", dpi=150); plt.close(fig)
 
@@ -334,15 +358,19 @@ def main():
     e = e.copy()
     e["stale_h"] = (pd.to_datetime(e.invited_at, utc=True) -
                     pd.to_datetime(e.profile_synced_at, utc=True)).dt.total_seconds() / 3600
-    for c in ["intent_score", "pool_size", "stale_h"]:
-        say("  %-14s AUC = %.3f" % (c, auc(e[c], e.y)))
-    say("  → intent_score（系统明面上的邀约依据）AUC 0.498 = 零区分度")
-    say("  → stale_h（活跃数据新鲜度）AUC 0.807 = 唯一有实质区分度的字段")
-    say("  intent_score 六档明细（U 形，非单调）:")
+    aucs = {c: auc(e[c], e.y) for c in ["intent_score", "pool_size", "stale_h"]}
+    for c, v in aucs.items():
+        say("  %-14s AUC = %.3f" % (c, v))
+    say("  → intent_score（系统明面上的邀约依据）AUC %.3f = 零区分度" % aucs["intent_score"])
+    say("  → stale_h（活跃数据新鲜度）AUC %.3f = 唯一有实质区分度的字段" % aucs["stale_h"])
+    say("  intent_score 六档明细（两端高、中段低，非单调）:")
     ib0 = pd.cut(e.intent_score, [0, 5, 10, 15, 20, 25, 31], right=False)
-    for k0, g0 in e.groupby(ib0, observed=True):
-        say("    %-9s n=%3d  爽约率 %5.1f%%" % (str(k0), len(g0), 100 * g0.y.mean()))
-    say("  → 最高意愿档（25-30）反而比最低档更高；读图见 fig_intent.png")
+    r6 = 100 * e.groupby(ib0, observed=True).y.mean()
+    for k0, v0 in r6.items():
+        say("    %-9s n=%3d  爽约率 %5.1f%%" % (str(k0), int((ib0 == k0).sum()), v0))
+    say("  → 最高意愿档（25-30）%.1f%% 与最低档（0-4）%.1f%% 基本同高，两者都比中段最低的 %.1f%% 高"
+        % (r6.iloc[-1], r6.iloc[0], r6[1:-1].min()))
+    say("     方向与题面预期（分数越低越易爽约）不符：不是单调关系，读图见 fig_intent.png")
 
     say("\n" + "=" * 66)
     say("三、根因：不是渐变，是断崖 + 观测空档")
@@ -556,22 +584,22 @@ def main():
             % (name, n, 100 * n / n_all, 100 * hit / tot, 100 * p, net, tail))
         return net
 
-    rules = {}
-    rules["① 全量干预（无差别）"] = (0, 0, ev("① 全量干预（无差别）", e.y.notna()))
+    rules = {}          # 规则名 -> 净收益（小时）
+    rules["① 全量干预（无差别）"] = ev("① 全量干预（无差别）", e.y.notna())
     for t_ in [5, 10, 15]:
         k = "② intent_score<=%d（现依据）" % t_
-        rules[k] = (0, 0, ev(k, e.intent_score <= t_))
+        rules[k] = ev(k, e.intent_score <= t_)
     k = "③ 陈旧>18min（保守版）"
-    rules[k] = (0, 0, ev(k, e.stale_h > CLIFF_H))
-    rules["④ 陈旧>18min 或 pool>=70"] = (0, 0, ev("④ 陈旧>18min 或 pool>=70",
-                                               (e.stale_h > CLIFF_H) | (e.pool_size >= 70)))
-    rules["⑤ 部门=商业化销售部"] = (0, 0, ev("⑤ 部门=商业化销售部", e.department == "商业化销售部"))
-    rules["⑥ intent<=15 且 陈旧>30min"] = (0, 0, ev("⑥ intent<=15 且 陈旧>30min",
-                                                   (e.intent_score <= 15) & (e.stale_h > .5)))
+    rules[k] = ev(k, e.stale_h > CLIFF_H)
+    rules["④ 陈旧>18min 或 pool>=70"] = ev("④ 陈旧>18min 或 pool>=70",
+                                          (e.stale_h > CLIFF_H) | (e.pool_size >= 70))
+    rules["⑤ 部门=商业化销售部"] = ev("⑤ 部门=商业化销售部", e.department == "商业化销售部")
+    rules["⑥ intent<=15 且 陈旧>30min"] = ev("⑥ intent<=15 且 陈旧>30min",
+                                            (e.intent_score <= 15) & (e.stale_h > .5))
     k7 = "⑦ 陈旧>18min 且非%s（推荐）" % dept
-    rules[k7] = (0, 0, ev(k7, (e.stale_h > CLIFF_H) & (e.department != dept)))
+    rules[k7] = ev(k7, (e.stale_h > CLIFF_H) & (e.department != dept))
     k8 = "⑧ 陈旧>23min 且非%s" % dept
-    rules[k8] = (0, 0, ev(k8, (e.stale_h > 23 / 60) & (e.department != dept)))
+    rules[k8] = ev(k8, (e.stale_h > 23 / 60) & (e.department != dept))
 
     m = (e.stale_h > CLIFF_H) & (e.department != dept)
     n, hit = int(m.sum()), int(e.y[m].sum())
@@ -601,7 +629,10 @@ def main():
     say("\n" + "=" * 66)
     say("六、明确不做的事（附数字理由）")
     say("=" * 66)
-    say("  · 不按 intent_score 挑人：各档净收益全为负，最好的一档也只是把亏损从 -8720h 缩到 -1460h")
+    _ni = max(v for k, v in rules.items() if "intent_score" in k)
+    _nb = next(v for k, v in rules.items() if "全量" in k)
+    say("  · 不按 intent_score 挑人：各档净收益全为负，最好的一档也只是把亏损从 %+dh 缩到 %+dh"
+        % (_nb, _ni))
     say("  · 不对新鲜通道（%d 条）做任何干预：其爽约率仅 %.2f%%，远低于 22.2%% 保本线，"
         % (len(lo), 100 * lo.y.mean()))
     say("    对这些人的干预纯属浪费（若覆盖 %d 人需多花 %d 小时）" % (len(lo), len(lo) * 20))
@@ -621,7 +652,7 @@ def main():
         % (int(a.y.sum()) * 90 - len(a) * 20))
 
     fig_cliff(e); fig_gap(e); fig_simpson(e); fig_intent(e); fig_dimensions(e, dept)
-    fig_interaction(e, dept); fig_rules(e, rules)
+    fig_interaction(e, dept); fig_rules(e, rules, dept)
     say("\n已生成图: fig_cliff / fig_gap / fig_simpson / fig_intent / fig_dimensions / "
         "fig_interaction / fig_rules (.png)")
     (OUT / "report.txt").write_text("\n".join(L), encoding="utf-8")
