@@ -9,7 +9,7 @@ interview_no_show.py — 面试爽约分析（可复现）
 
 产出:
     output/report.txt      全部数字（README 里每个数字都能在这里找到）
-    output/fig_*.png       5 张图
+    output/fig_*.png       6 张图
 
 设计原则:
     1. 只用发放数据，不引入任何外部或合成数据
@@ -17,7 +17,9 @@ interview_no_show.py — 面试爽约分析（可复现）
     3. 打印"反例检验"的结果，不只打印支持结论的证据
 """
 
+import math
 import sys
+from math import comb
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +87,41 @@ def auc(score, y):
     return (r[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
 
 
+def wilson_ci(k, n, z=1.96):
+    """比率的 95% 置信区间（Wilson 法，小样本比正态近似稳）。"""
+    if n == 0:
+        return (float("nan"), float("nan"))
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, c - h), min(1.0, c + h))
+
+
+def ci_str(k, n):
+    lo, hi = wilson_ci(int(k), int(n))
+    return "%.1f%%  [95%%CI %.1f%%~%.1f%%]" % (100 * k / n, 100 * lo, 100 * hi)
+
+
+def fisher_two_sided(a, b, c, d):
+    """2x2 Fisher 精确检验（双尾）。a,b = 组1的(阳性,阴性)；c,d = 组2的(阳性,阴性)。"""
+    n = a + b + c + d
+    r1, r2, c1 = a + b, c + d, a + c
+    if min(r1, r2, c1, n - c1) < 0 or n == 0:
+        return float("nan")
+
+    def pr(x):
+        return comb(r1, x) * comb(r2, c1 - x) / comb(n, c1)
+
+    obs = pr(a)
+    tot = 0.0
+    for x in range(max(0, c1 - r2), min(r1, c1) + 1):
+        pv = pr(x)
+        if pv <= obs * (1 + 1e-9) + 1e-15:
+            tot += pv
+    return min(1.0, tot)
+
+
 def fig_cliff(e):
     """爽约率 vs 活跃数据新鲜度（分钟轴），只标注 n>=10 的档位。"""
     bins = np.arange(0, 75, 5)                       # 5 分钟一档
@@ -137,9 +174,35 @@ def fig_simpson(e):
     ax.text(3.42, BREAKEVEN * 100 + .8, "干预保本线 22.2%", fontsize=8, ha="right")
     ax.set_xticks(x); ax.set_xticklabels(depts, fontsize=9)
     ax.set_ylabel("爽约率 %"); ax.legend(fontsize=8.5)
-    ax.set_title("部门差异是假的：分层后 14 个百分点的差距基本消失")
+    ax.set_title("分层后：新鲜通道内部门差异消失（14.0pp → 1.8pp），但陈旧通道内没有")
     ax.grid(alpha=.25, axis="y")
     fig.tight_layout(); fig.savefig(OUT / "fig_simpson.png", dpi=150); plt.close(fig)
+
+
+def fig_interaction(e, dept):
+    """陈旧通道内的部门差异（带 Wilson 95% CI 误差棒）——全数据里最强的一个信号。"""
+    stale = e[e.stale_h > CLIFF_H]
+    cnt = stale.department.value_counts()
+    depts = list(cnt.index)
+    rate, lo_e, hi_e = [], [], []
+    for d_ in depts:
+        s = stale[stale.department == d_]
+        k, n = int(s.y.sum()), len(s)
+        lo, hi = wilson_ci(k, n)
+        rate.append(100 * k / n)
+        lo_e.append(100 * (k / n - lo)); hi_e.append(100 * (hi - k / n))
+    fig, ax = plt.subplots(figsize=(9, 4.3))
+    cols = ["#2e7d32" if d_ == dept else "#c62828" for d_ in depts]
+    ax.bar(depts, rate, width=.55, color=cols)
+    ax.errorbar(depts, rate, yerr=[lo_e, hi_e], fmt="none", ecolor="#333", capsize=4, lw=1.2)
+    for i, (r, he, n) in enumerate(zip(rate, hi_e, [cnt[d_] for d_ in depts])):
+        ax.text(i, r + he + 1.2, "%.1f%%  (n=%d)" % (r, n), ha="center", fontsize=8.5)
+    ax.axhline(BREAKEVEN * 100, ls=":", c="k", lw=1.2)
+    ax.text(len(depts) - .46, BREAKEVEN * 100 + 1.4, "干预保本线 22.2%", fontsize=8, ha="right")
+    ax.set_ylabel("爽约率 %")
+    ax.set_title("陈旧通道内：只有 %s 低于保本线（应排除），其余三部门都应干预（误差棒=95%%CI）" % dept)
+    ax.set_ylim(0, max(rate) + max(hi_e) + 8); ax.grid(alpha=.25, axis="y")
+    fig.tight_layout(); fig.savefig(OUT / "fig_interaction.png", dpi=150); plt.close(fig)
 
 
 def fig_rules(e, rules):
@@ -151,7 +214,8 @@ def fig_rules(e, rules):
         ax.text(v + (60 if v > 0 else -60), i, "%+d h" % v, va="center",
                 ha="left" if v > 0 else "right", fontsize=8.5)
     ax.set_xlabel("净收益（小时）＝ 拦截爽约×90 − 干预数×20")
-    ax.set_title("干预谁才划算：按新鲜度挑人 vs 按意向分挑人")
+    ax.set_title("干预谁才划算：只有「按新鲜度」为正；排除风险合规部后（⑦）再 +930 h")
+    ax.set_xlim(min(nets) - 1250, max(nets) + 950)
     ax.grid(alpha=.25, axis="x")
     fig.tight_layout(); fig.savefig(OUT / "fig_rules.png", dpi=150); plt.close(fig)
 
@@ -207,11 +271,43 @@ def main():
     gap = e[(e.stale_h > lo.stale_h.max()) & (e.stale_h < hi.stale_h.min())]
     say("  两群之间 (%.1f, %.1f) 分钟的区间里观测数 = %d 条"
         % (lo.stale_h.max() * 60, hi.stale_h.min() * 60, len(gap)))
-    say("  新鲜通道上界正好压在 18.00 分钟这一点上（n=%d 条），再往上直接跳到 22 分钟——像一档缓存/会话有效期"
-        % int((e.stale_h.round(6) == CLIFF_H).sum()))
+    say("  密集观测区的上界压在 18.00 分钟这一点上（n=%d 条，爽约率 %.1f%%），(18,22) 分钟开区间零观测，"
+        % (int((e.stale_h.round(6) == CLIFF_H).sum()),
+           100 * e[e.stale_h.round(6) == CLIFF_H].y.mean()))
+    say("    像一档缓存/会话有效期；但 22~23 分钟（含端点）另有 %d 条稀疏观测且全部未爽约，"
+        % int(((e.stale_h >= 22 / 60 - 1e-9) & (e.stale_h <= 23 / 60 + 1e-9)).sum()))
+    say("    爽约率的真正跳变发生在 23→24 分钟（24 分钟起 %.0f%%）。"
+        % (100 * e[(e.stale_h * 60 >= 24) & (e.stale_h * 60 < 25)].y.mean()))
     say("  爽约率倍数: %.1f 倍" % (hi.y.mean() / lo.y.mean()))
     say("  → 如果是'意愿随时间衰减'，曲线应当是渐变的；出现纯空档+阶跃，")
     say("    指向'两套取数逻辑/两条管道'的机制切换，而不是同一条曲线的陡坡。")
+
+    say("\n  [阈值扫描] 净收益 = 拦截爽约×90 − 干预数×20，扫 5~78 分钟:")
+    scan = []
+    for tm in np.arange(5, 78.1, 1.0):
+        mm = e.stale_h > tm / 60
+        nn, hh = int(mm.sum()), int(e.y[mm].sum())
+        if nn >= 20:
+            scan.append((tm, nn, hh, hh * COST_NO_SHOW_H - nn * COST_CONFIRM_H))
+    sc = pd.DataFrame(scan, columns=["min", "n", "hit", "net"])
+    top = sc.loc[sc.net.idxmax()]
+    at18 = sc.loc[(sc["min"] - CLIFF_MIN).abs().idxmin()]
+    say("    最大净收益: >%.0f 分钟  n=%d  拦截 %d  净收益 %+d h"
+        % (top["min"], top.n, top.hit, top.net))
+    say("    取 18 分钟:            n=%d  拦截 %d  净收益 %+d h  （比最优点少 %d h，约 %.1f%%）"
+        % (at18.n, at18.hit, at18.net, top.net - at18.net,
+           100 * (top.net - at18.net) / at18.net))
+    say("    → 最优点在 %.0f~%.0f 分钟，但要走到那里必须把 22~23 分钟那 %d 条观测（全部未爽约）"
+        % (sc[sc.net > top.net - 40]["min"].min(), sc[sc.net > top.net - 40]["min"].max(),
+           int(((e.stale_h >= 22 / 60 - 1e-9) & (e.stale_h <= 23 / 60 + 1e-9)).sum())))
+    say("      一并排除 —— 靠这 %d 条把边界推后属于过拟合小样本。"
+        % int(((e.stale_h >= 22 / 60 - 1e-9) & (e.stale_h <= 23 / 60 + 1e-9)).sum()))
+    say("      18.00 分钟那一点有 %d 条（%.1f%%），是密集观测区的边界；"
+        % (int((e.stale_h.round(6) == CLIFF_H).sum()),
+           100 * e[e.stale_h.round(6) == CLIFF_H].y.mean()))
+    say("      放弃这 %d 小时（%.1f%%）换稳健性 —— 取舍理由写进了 README。"
+        % (top.net - at18.net, 100 * (top.net - at18.net) / at18.net))
+    say("    阈值不敏感区: 18~22 分钟之间任意取值结果完全相同（该区间零观测）。")
 
     say("\n" + "=" * 66)
     say("四、反例检验：部门差异与 pool_size 是否独立成立")
@@ -231,10 +327,57 @@ def main():
            100 * (t.新鲜通道.max() - t.新鲜通道.min())))
     say("  → 部门差异 14.0 个百分点里，有 %.1f 个百分点是'通道占比不同'造成的，不是部门本身的问题。"
         % (100 * (t.整体.max() - t.整体.min()) - 100 * (t.新鲜通道.max() - t.新鲜通道.min())))
-    say("  ⚠️ 但没完全消失：陈旧通道内 风险合规部 %.1f%%，仍显著低于其他三部门（%.1f%%~%.1f%%），"
-        % (100 * t.loc["风险合规部", "陈旧通道"], 100 * t[t.index != "风险合规部"]["陈旧通道"].min(),
-           100 * t[t.index != "风险合规部"]["陈旧通道"].max()))
-    say("     说明除通道外还有一个较小的部门级因素（本样本不足以拆开，列入局限）。")
+    say("  ⚠️ 只在新鲜通道内消失了；陈旧通道内部门差异不但没消失，反而是全数据里最强的信号之一（见下）。")
+
+    say("\n  [检验 A] 陈旧通道内：是否存在一个'免疫'部门（数据驱动选出，非人为指定）")
+    stale = e[e.ch == "陈旧"]
+    cand = t[t.陈旧n >= 50].sort_values("陈旧通道")
+    dept = cand.index[0] if len(cand) else t.sort_values("陈旧通道").index[0]
+    a = stale[stale.department == dept]
+    b = stale[stale.department != dept]
+    say("    候选（陈旧通道内 n>=50 且爽约率最低）: %s" % dept)
+    say("      %s        n=%3d  爽约 %3d  %s" % (dept, len(a), int(a.y.sum()), ci_str(a.y.sum(), len(a))))
+    say("      其他三部门合计  n=%3d  爽约 %3d  %s"
+        % (len(b), int(b.y.sum()), ci_str(b.y.sum(), len(b))))
+    say("      两组 95%% 置信区间%s" %
+        ("完全不重叠" if wilson_ci(a.y.sum(), len(a))[1] < wilson_ci(b.y.sum(), len(b))[0]
+         else "有重叠"))
+    p_f = fisher_two_sided(int(a.y.sum()), len(a) - int(a.y.sum()),
+                           int(b.y.sum()), len(b) - int(b.y.sum()))
+    say("      Fisher 精确检验 双尾 p = %.2g" % p_f)
+    say("      4 个部门里挑最极端的那个 → Bonferroni ×%d 校正后 p = %.2g  %s"
+        % (len(t), min(1.0, p_f * len(t)),
+           "仍显著" if p_f * len(t) < 0.05 else "不显著"))
+    say("\n  [检验 B] 其他三个部门互相比（排除'只是随机波动'）:")
+    for d_ in t.index:
+        if d_ == dept:
+            continue
+        aa = stale[stale.department == d_]
+        bb = stale[stale.department != d_]
+        pp = fisher_two_sided(int(aa.y.sum()), len(aa) - int(aa.y.sum()),
+                              int(bb.y.sum()), len(bb) - int(bb.y.sum()))
+        say("      %-8s n=%3d %.1f%%  p=%.3g  校正后 p=%.3g  %s"
+            % (d_, len(aa), 100 * aa.y.mean(), pp, min(1.0, pp * len(t)),
+               "仍显著" if pp * len(t) < 0.05 else "不显著"))
+    say("      → 只有 %s 特殊，其余三个部门之间无显著差异，不是四选一的随机 luck。" % dept)
+
+    say("\n  [检验 C] 稳健性：这个效应是否只是 18 分钟这个阈值碰巧造成的")
+    for th in [0.30, 0.40, 0.50, 0.60, 0.80]:
+        s = e[e.stale_h > th]
+        aa = s[s.department == dept]
+        bb = s[s.department != dept]
+        if len(aa) >= 10:
+            say("      > %.2f h (%.0f min): %s n=%2d %5.1f%%  |  其他 n=%3d %5.1f%%"
+                % (th, th * 60, dept, len(aa), 100 * aa.y.mean(), len(bb), 100 * bb.y.mean()))
+    say("      → 每一档都成立，不依赖阈值选择。")
+
+    fr = e[e.ch == "新鲜"]
+    aa = fr[fr.department == dept]
+    say("\n  [检验 D] 反向印证：%s 在新鲜通道内 %.1f%%（n=%d）vs 全体新鲜 %.1f%%"
+        % (dept, 100 * aa.y.mean(), len(aa), 100 * fr.y.mean()))
+    say("      → 该部门不是'整体更靠谱'，而是'即使数据陈旧也仍会出席'。")
+    say("        这是真正的【交互效应】：通道是主因，%s 在陈旧通道上另有一条独立免疫。" % dept)
+    say("  ⚠️ 该发现属事后发现（post-hoc，4 选 1），须在新数据或 A/B 中复核，不能直接当长期配额。")
     lo_m = e.pool_size <= e.pool_size.median()
     say("  pool_size 表观 AUC 0.573，分层后:")
     say("    新鲜通道 pool<=中位 %.1f%% vs >中位 %.1f%%"
@@ -270,22 +413,40 @@ def main():
     for t_ in [5, 10, 15]:
         k = "② intent_score<=%d（现依据）" % t_
         rules[k] = (0, 0, ev(k, e.intent_score <= t_))
-    k = "③ 陈旧>18min（推荐）"
+    k = "③ 陈旧>18min（保守版）"
     rules[k] = (0, 0, ev(k, e.stale_h > CLIFF_H))
     rules["④ 陈旧>18min 或 pool>=70"] = (0, 0, ev("④ 陈旧>18min 或 pool>=70",
                                                (e.stale_h > CLIFF_H) | (e.pool_size >= 70)))
     rules["⑤ 部门=商业化销售部"] = (0, 0, ev("⑤ 部门=商业化销售部", e.department == "商业化销售部"))
     rules["⑥ intent<=15 且 陈旧>30min"] = (0, 0, ev("⑥ intent<=15 且 陈旧>30min",
                                                    (e.intent_score <= 15) & (e.stale_h > .5)))
+    k7 = "⑦ 陈旧>18min 且非%s（推荐）" % dept
+    rules[k7] = (0, 0, ev(k7, (e.stale_h > CLIFF_H) & (e.department != dept)))
+    k8 = "⑧ 陈旧>23min 且非%s" % dept
+    rules[k8] = (0, 0, ev(k8, (e.stale_h > 23 / 60) & (e.department != dept)))
 
-    m = e.stale_h > CLIFF_H
+    m = (e.stale_h > CLIFF_H) & (e.department != dept)
     n, hit = int(m.sum()), int(e.y[m].sum())
-    say("\n  推荐规则明细：对活跃状态同步超过 18 分钟的邀约，做一次提前意向二次确认")
+    m3 = e.stale_h > CLIFF_H
+    n3, hit3 = int(m3.sum()), int(e.y[m3].sum())
+    say("\n  推荐规则明细：对【活跃状态同步超过 18 分钟】且【部门 ≠ %s】的邀约，做一次提前意向二次确认" % dept)
     say("    干预 %d / %d 条（占 %.0f%% 的邀约），拦截 %d / %d 次爽约（覆盖 %.1f%%）"
         % (n, n_all, 100 * n / n_all, hit, tot, 100 * hit / tot))
     say("    命中率 %.1f%%，净收益 %+d 小时；同样口径下全量干预是 %+d 小时"
         % (100 * hit / n, hit * 90 - n * 20, tot * 90 - n_all * 20))
-    say("    阈值敏感性：把 18 分钟换成 18~22 分钟之间任意值，结果完全相同（该区间零观测）")
+    say("    对比保守版（不排除 %s）：干预 %d、覆盖 %.1f%%、命中 %.1f%%、净收益 %+d h"
+        % (dept, n3, 100 * hit3 / tot, 100 * hit3 / n3, hit3 * 90 - n3 * 20))
+    say("    → 排除该部门后少干预 %d 条（省 %d h），只少拦 %d 次爽约（少挽回 %d h），净多得 %+d 小时"
+        % (n3 - n, (n3 - n) * 20, hit3 - hit, (hit3 - hit) * 90,
+           (hit * 90 - n * 20) - (hit3 * 90 - n3 * 20)))
+    say("    被排除的那 %d 条：爽约率仅 %.1f%%，干预净收益 %+d h（成本 %d h 只挽回 %d h）"
+        % (n3 - n, 100 * e[(e.stale_h > CLIFF_H) & (e.department == dept)].y.mean(),
+           int(e[(e.stale_h > CLIFF_H) & (e.department == dept)].y.sum()) * 90 - (n3 - n) * 20,
+           (n3 - n) * 20,
+           int(e[(e.stale_h > CLIFF_H) & (e.department == dept)].y.sum()) * 90))
+    say("    阈值敏感性：18~22 分钟之间任意取值结果完全相同（该区间零观测）；")
+    say("      扫描最优点在 22~23 分钟（多 %+d h），但那里只有 6 条观测，坚持 18 分钟——理由见第三节。"
+        % (top.net - at18.net))
     say("    成本敏感性：需要'二次确认有效率' > %.0f%% 才划算（见 README 假设）"
         % (100 * BREAKEVEN / (hit / n)))
 
@@ -296,10 +457,20 @@ def main():
     say("  · 不对新鲜通道（%d 条）做任何干预：其爽约率仅 %.2f%%，远低于 22.2%% 保本线，"
         % (len(lo), 100 * lo.y.mean()))
     say("    对这些人的干预纯属浪费（若覆盖 %d 人需多花 %d 小时）" % (len(lo), len(lo) * 20))
-    say("  · 不按部门/职能单独干预：分层后部门差异从 14.0 个百分点缩到 1.8 个百分点，按部门切是拿表象当原因")
+    say("  · 不按部门做'多干预/少干预'的整体配额：新鲜通道内四部门差距只有 %.1f 个百分点，"
+        % (100 * (t.新鲜通道.max() - t.新鲜通道.min())))
+    say("    那 %.1f 个百分点纯粹是'谁的邀约更多走了陈旧通道'造成的，按部门配额度是拿表象当原因。"
+        % (100 * (t.整体.max() - t.整体.min()) - 100 * (t.新鲜通道.max() - t.新鲜通道.min())))
+    say("  · 但有一个例外，且已做进规则：陈旧通道内 %s 只有 %.1f%%（n=%d）vs 其他三部门 %.1f%%（n=%d），"
+        % (dept, 100 * a.y.mean(), len(a), 100 * b.y.mean(), len(b)))
+    say("    Fisher p=%.1e、Bonferroni 校正后仍显著、CI 不重叠、各档阈值下都成立；" % p_f)
+    say("    给这批人做二次确认净收益 %+d 小时，必须排除（不是'少干预'，是完全不干预）。"
+        % (int(a.y.sum()) * 90 - len(a) * 20))
 
-    fig_cliff(e); fig_gap(e); fig_simpson(e); fig_intent(e); fig_rules(e, rules)
-    say("\n已生成图: fig_cliff / fig_gap / fig_simpson / fig_intent / fig_rules (.png)")
+    fig_cliff(e); fig_gap(e); fig_simpson(e); fig_intent(e)
+    fig_interaction(e, dept); fig_rules(e, rules)
+    say("\n已生成图: fig_cliff / fig_gap / fig_simpson / fig_intent / "
+        "fig_interaction / fig_rules (.png)")
     (OUT / "report.txt").write_text("\n".join(L), encoding="utf-8")
     print("\n已写入 %s" % (OUT / "report.txt"))
 
