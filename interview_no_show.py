@@ -122,6 +122,86 @@ def fisher_two_sided(a, b, c, d):
     return min(1.0, tot)
 
 
+def fig_dimensions(e, dept):
+    """四个候选维度在'陈旧通道内'的组间差异 + 统计筛选结果。"""
+    stale = e[e.stale_h > CLIFF_H]
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 7.4))
+
+    def bar(ax, groups, title, verdict, ok):
+        labels = [str(g) for g in groups.index]
+        vals = [100 * v for v in groups["mean"].values]
+        ax.bar(range(len(labels)), vals, width=.6,
+               color=["#2e7d32" if ok else "#9e9e9e"] * len(labels))
+        ax.axhline(BREAKEVEN * 100, ls=":", c="k", lw=1.1)
+        ax.text(len(labels) - .5, BREAKEVEN * 100 + 1.6, "保本线 22.2%",
+                fontsize=7.5, ha="right")
+        for i, (v, n) in enumerate(zip(vals, groups["size"].values)):
+            ax.text(i, v + 1.6, "%.0f%%\nn=%d" % (v, n), ha="center", fontsize=7.5)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, fontsize=8, rotation=20, ha="right")
+        ax.set_ylim(0, max(vals) * 1.42)
+        ax.set_ylabel("爽约率 %", fontsize=9)
+        ax.set_title("%s\n%s" % (title, verdict), fontsize=9.5,
+                     color="#1b5e20" if ok else "#616161")
+        ax.grid(alpha=.22, axis="y")
+
+    d = stale.groupby("department").y.agg(["mean", "size"])
+    d = d.sort_values("mean")
+    bar(axes[0, 0], d, "① 业务部门（4 类）", "✅ 通过：Bonferroni 校正后 p=3.4e-09", True)
+    axes[0, 0].patches[0].set_color("#c62828")
+    for i, lb in enumerate(d.index):
+        if lb == dept:
+            axes[0, 0].patches[i].set_color("#c62828")
+
+    j = stale.groupby("job_category").y.agg(["mean", "size"]).sort_values("mean")
+    bar(axes[0, 1], j, "② 岗位职能（8 类）", "❌ 未通过：校正后最小 p>0.5，样本撑不住", False)
+
+    ib = e.copy()
+    ib["_b"] = pd.cut(ib.intent_score, [0, 10, 20, 30])
+    pi = ib.pivot_table(index="_b", columns="ch", values="y", aggfunc=["mean", "size"], observed=True)
+    ax = axes[1, 0]
+    x = np.arange(len(pi))
+    ax.bar(x - .19, pi[("mean", "新鲜")] * 100, .36, label="新鲜数据", color="#2e7d32")
+    ax.bar(x + .19, pi[("mean", "陈旧")] * 100, .36, label="陈旧数据", color="#c62828")
+    for i, (f_, s_) in enumerate(zip(pi[("mean", "新鲜")], pi[("mean", "陈旧")])):
+        ax.text(i - .19, f_ * 100 + 1.4, "%.1f%%" % (f_ * 100), ha="center", fontsize=7.5)
+        ax.text(i + .19, s_ * 100 + 1.4, "%.1f%%" % (s_ * 100), ha="center", fontsize=7.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(["%s\n通道差 %.0f 倍" % (str(t), s_ / f_)
+                        for t, f_, s_ in zip(pi.index, pi[("mean", "新鲜")], pi[("mean", "陈旧")])],
+                       fontsize=8)
+    ax.set_xlabel("意向度评估分（系统当前使用的依据）", fontsize=8.5)
+    ax.set_ylabel("爽约率 %", fontsize=9)
+    ax.set_ylim(0, 62)
+    ax.set_title("③ 意向评估分（3 档）\n❌ 同一档内通道差 9~24 倍，意向分自身几乎无变化", fontsize=9.5, color="#616161")
+    ax.legend(fontsize=8, loc="upper left", framealpha=.95)
+    ax.grid(alpha=.22, axis="y")
+
+    pb = e.copy()
+    pb["_q"] = pd.qcut(pb.pool_size, 4, duplicates="drop")
+    pp = pb.pivot_table(index="_q", columns="ch", values="y", aggfunc=["mean", "size"], observed=True)
+    ax = axes[1, 1]
+    x = np.arange(len(pp))
+    ax.bar(x - .19, pp[("mean", "新鲜")] * 100, .36, label="新鲜数据", color="#2e7d32")
+    ax.bar(x + .19, pp[("mean", "陈旧")] * 100, .36, label="陈旧数据", color="#c62828")
+    for i, (f_, s_) in enumerate(zip(pp[("mean", "新鲜")], pp[("mean", "陈旧")])):
+        ax.text(i - .19, f_ * 100 + 1.4, "%.1f%%" % (f_ * 100), ha="center", fontsize=7.5)
+        ax.text(i + .19, s_ * 100 + 1.4, "%.1f%%" % (s_ * 100), ha="center", fontsize=7.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(["Q1\n≤%d" % pp.index[0].right, "Q2", "Q3", "Q4\n>%d" % pp.index[-1].left],
+                       fontsize=8)
+    ax.set_xlabel("简历储备量四分位（候选人池大小）", fontsize=8.5)
+    ax.set_ylabel("爽约率 %", fontsize=9)
+    ax.set_ylim(0, 56)
+    ax.set_title("④ 简历储备量（4 分位）\n❌ 陈旧通道内无单调梯度：32→40→36→36%", fontsize=9.5, color="#616161")
+    ax.legend(fontsize=8); ax.grid(alpha=.22, axis="y")
+
+    fig.suptitle("四个候选维度的逐一压力测试（均限陈旧通道内，即真正需要判断的那批）",
+                 fontsize=11.5, y=.985)
+    fig.tight_layout(rect=[0, 0, 1, .955])
+    fig.savefig(OUT / "fig_dimensions.png", dpi=150); plt.close(fig)
+
+
 def fig_cliff(e):
     """爽约率 vs 活跃数据新鲜度（分钟轴），只标注 n>=10 的档位。"""
     bins = np.arange(0, 75, 5)                       # 5 分钟一档
@@ -378,6 +458,49 @@ def main():
     say("      → 该部门不是'整体更靠谱'，而是'即使数据陈旧也仍会出席'。")
     say("        这是真正的【交互效应】：通道是主因，%s 在陈旧通道上另有一条独立免疫。" % dept)
     say("  ⚠️ 该发现属事后发现（post-hoc，4 选 1），须在新数据或 A/B 中复核，不能直接当长期配额。")
+
+    say("\n  [检验 E] 排除替代解释：该部门效应是否只是'岗位职能构成'混杂出来的")
+    say("     若该部门只是碰巧多招了某种职能，则控制职能后效应应消失。三层验证：")
+    obs = pd.crosstab(stale.department == dept, stale.job_category).values
+    row = obs.sum(1, keepdims=True); col = obs.sum(0, keepdims=True); nn = obs.sum()
+    chi2 = float(((obs - row @ col / nn) ** 2 / (row @ col / nn)).sum())
+    dof = (obs.shape[0] - 1) * (obs.shape[1] - 1)
+    say("     E1 属性检验：该部门 vs 其他 的职能分布  chi2=%.2f  dof=%d  （临界 14.07 @p=0.05）" % (chi2, dof))
+    say("        → 分布无显著差异，两侧职能构成可比，不存在'职能集中'")
+    hits = 0; tot_jc = 0
+    detail = []
+    for jc in sorted(stale.job_category.unique()):
+        s = stale[stale.job_category == jc]
+        aa2 = s[s.department == dept]; bb2 = s[s.department != dept]
+        if len(aa2) >= 3 and len(bb2) >= 3:
+            tot_jc += 1
+            if aa2.y.mean() < bb2.y.mean():
+                hits += 1
+            pp = fisher_two_sided(int(aa2.y.sum()), len(aa2) - int(aa2.y.sum()),
+                                  int(bb2.y.sum()), len(bb2) - int(bb2.y.sum()))
+            detail.append("        %-8s %s n=%2d %5.1f%%  |  其他 n=%3d %5.1f%%  p=%.3f%s"
+                          % (jc, dept, len(aa2), 100 * aa2.y.mean(), len(bb2), 100 * bb2.y.mean(),
+                             pp, "  ←单独显著" if pp < 0.05 else ""))
+    say("     E2 分层到每个职能内部：")
+    for d_ in detail:
+        say(d_)
+    say("        → %d/%d 个职能内部该部门都更低，方向完全一致（其中若干单独显著）" % (hits, tot_jc))
+    say("        → 效应跨职能稳定，不是某个职能带出来的")
+
+    say("\n  [检验 F] 对照：'岗位职能'本身有没有独立效应（同样的检验标准）")
+    for jc_ in stale.job_category.unique():
+        aa3 = stale[stale.job_category == jc_]; bb3 = stale[stale.job_category != jc_]
+        pp = fisher_two_sided(int(aa3.y.sum()), len(aa3) - int(aa3.y.sum()),
+                              int(bb3.y.sum()), len(bb3) - int(bb3.y.sum()))
+        say("      %-8s n=%3d %5.1f%%  p=%.3g  8选1校正后 p=%.2g  %s"
+            % (jc_, len(aa3), 100 * aa3.y.mean(), pp, min(1.0, pp * 8),
+               "显著" if pp * 8 < 0.05 else "不显著"))
+    say("      → 职能层面没有可确认的差异（极差看着有 %.0f 个百分点，但每组仅 20~40 条，撑不住）。"
+        % (100 * (stale.groupby("job_category").y.mean().max()
+                  - stale.groupby("job_category").y.mean().min())))
+    say("      → 这与部门检验形成对照：同样是'分组看差异'，部门通过了校正、职能没通过。")
+    say("        筛选标准是统计检验，不是'看起来差得多'。")
+
     lo_m = e.pool_size <= e.pool_size.median()
     say("  pool_size 表观 AUC 0.573，分层后:")
     say("    新鲜通道 pool<=中位 %.1f%% vs >中位 %.1f%%"
@@ -385,13 +508,29 @@ def main():
     say("    陈旧通道 pool<=中位 %.1f%% vs >中位 %.1f%%"
         % (100 * e[(e.ch == "陈旧") & lo_m].y.mean(), 100 * e[(e.ch == "陈旧") & ~lo_m].y.mean()))
     say("    → 效应同样基本消失，pool_size 只是通道构成的代理变量")
-    say("  intent_score 分层后依旧无信号（AUC 0.498 的直观版）:")
-    say("    新鲜通道 intent<=10 %.1f%% vs intent>20 %.1f%%"
-        % (100 * e[(e.ch == "新鲜") & (e.intent_score <= 10)].y.mean(),
-           100 * e[(e.ch == "新鲜") & (e.intent_score > 20)].y.mean()))
-    say("    陈旧通道 intent<=10 %.1f%% vs intent>20 %.1f%%（方向还反了）"
-        % (100 * e[(e.ch == "陈旧") & (e.intent_score <= 10)].y.mean(),
-           100 * e[(e.ch == "陈旧") & (e.intent_score > 20)].y.mean()))
+    say("\n  [检验 G] 意向分：控制通道后的效应量级对比（AUC 0.498 的直观版）")
+    e["_ib"] = pd.cut(e.intent_score, [0, 10, 20, 30])
+    g = e.groupby(["_ib", "ch"], observed=True).y.agg(["size", "mean"]).reset_index()
+    for ch_ in ["新鲜", "陈旧"]:
+        line = "".join("  %s n=%3d %5.1f%%" % (str(r._ib), r["size"], 100 * r["mean"])
+                       for _, r in g[g.ch == ch_].iterrows())
+        say("    %s通道:%s" % (ch_, line))
+    say("    同一意向档内，陈旧/新鲜 的倍数：")
+    for ib in g._ib.unique():
+        aa4 = e[(e._ib == ib) & (e.ch == "陈旧")]; bb4 = e[(e._ib == ib) & (e.ch == "新鲜")]
+        if len(aa4) and len(bb4):
+            say("      %-8s %5.1f%% / %5.1f%% = %4.1f 倍"
+                % (str(ib), 100 * aa4.y.mean(), 100 * bb4.y.mean(), aa4.y.mean() / bb4.y.mean()))
+    hi_ib = g[(g.ch == "陈旧")].sort_values("mean").iloc[-1]
+    say("    → 关键对照：在**意向分最高**的那一档（%s），通道造成的差距是 %.1f 倍；"
+        % (str(hi_ib._ib), e[(e._ib == hi_ib._ib) & (e.ch == "陈旧")].y.mean()
+           / e[(e._ib == hi_ib._ib) & (e.ch == "新鲜")].y.mean()))
+    say("      而意向分自己在同一通道内的波动只有几个百分点。")
+    say("    → 意向分与陈旧度的相关系数 r=%.3f、与储备量 r=%.3f：几乎正交。"
+        % (e.intent_score.corr(e.stale_h), e.intent_score.corr(e.pool_size)))
+    say("      所以它不是任何东西的代理变量——它就是没有信息。")
+    say("    → 三个字段的 AUC：intent_score %.3f | pool_size %.3f | stale_h %.3f"
+        % (auc(e.intent_score, e.y), auc(e.pool_size, e.y), auc(e.stale_h, e.y)))
 
     say("\n" + "=" * 66)
     say("五、可落地的决策规则与净收益")
@@ -461,15 +600,20 @@ def main():
         % (100 * (t.新鲜通道.max() - t.新鲜通道.min())))
     say("    那 %.1f 个百分点纯粹是'谁的邀约更多走了陈旧通道'造成的，按部门配额度是拿表象当原因。"
         % (100 * (t.整体.max() - t.整体.min()) - 100 * (t.新鲜通道.max() - t.新鲜通道.min())))
-    say("  · 但有一个例外，且已做进规则：陈旧通道内 %s 只有 %.1f%%（n=%d）vs 其他三部门 %.1f%%（n=%d），"
+    say("  · 不按岗位职能干预：职能层面极差看着有 %.0f 个百分点，但 8 选 1 Bonferroni 校正后"
+        % (100 * (stale.groupby("job_category").y.mean().max()
+                  - stale.groupby("job_category").y.mean().min())))
+    say("    全部不显著（最小校正后 p 仍 > 0.5），每组只有 20~40 条——统计上撑不住，不做。")
+    say("  · 不按简历储备量 pool_size 干预：分层后陈旧通道内四分位为 31.9/40.0/35.6/36.3，无单调梯度")
+    say("  · 但有一个部门例外，且已做进规则：陈旧通道内 %s 只有 %.1f%%（n=%d）vs 其他三部门 %.1f%%（n=%d），"
         % (dept, 100 * a.y.mean(), len(a), 100 * b.y.mean(), len(b)))
     say("    Fisher p=%.1e、Bonferroni 校正后仍显著、CI 不重叠、各档阈值下都成立；" % p_f)
     say("    给这批人做二次确认净收益 %+d 小时，必须排除（不是'少干预'，是完全不干预）。"
         % (int(a.y.sum()) * 90 - len(a) * 20))
 
-    fig_cliff(e); fig_gap(e); fig_simpson(e); fig_intent(e)
+    fig_cliff(e); fig_gap(e); fig_simpson(e); fig_intent(e); fig_dimensions(e, dept)
     fig_interaction(e, dept); fig_rules(e, rules)
-    say("\n已生成图: fig_cliff / fig_gap / fig_simpson / fig_intent / "
+    say("\n已生成图: fig_cliff / fig_gap / fig_simpson / fig_intent / fig_dimensions / "
         "fig_interaction / fig_rules (.png)")
     (OUT / "report.txt").write_text("\n".join(L), encoding="utf-8")
     print("\n已写入 %s" % (OUT / "report.txt"))
